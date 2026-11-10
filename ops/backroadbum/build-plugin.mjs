@@ -38,7 +38,7 @@ for (const args of [['run', 'typecheck'], ['run', 'build']]) execFileSync('npm',
 const output = resolve(root, 'dist/backroadbum'); rmSync(output, { recursive: true, force: true });
 cpSync(resolve(stage, 'dist'), resolve(output, 'dist'), { recursive: true });
 const backend = readFileSync(resolve(output, 'dist/plugin.mjs'));
-const profile = { profile: 'backroadbum/ship-readonly-v1', base, source: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
+const profile = { profile: 'backroadbum/ship-packing-v1', base, source: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
   origin: 'https://backroadbum.com', allowedHosts: ['backroadbum.com'], mode: 'test', bytes: backend.length,
   sha256: createHash('sha256').update(backend).digest('hex'),
   artifactSha256: createHash('sha256').update(backend).update(readFileSync(resolve(output, 'dist/manifest.json'))).digest('hex'),
