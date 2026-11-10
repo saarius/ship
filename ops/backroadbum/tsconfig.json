@@ -1,0 +1,6 @@
+{
+  "extends": "../../service/tsconfig.json",
+  "compilerOptions": { "types": [] },
+  "files": ["../../service/node_modules/@cloudflare/workers-types/index.d.ts", "../../service/src/env.d.ts"],
+  "include": ["worker.ts", "../../service/src/**/*.ts"]
+}

@@ -1,0 +1,29 @@
+[Unit]
+Description=Backroad Bum private Ship practice-label host
+After=network.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/var/lib/trialrun/workspace/repos/ship
+ExecStart=/opt/node/bin/node --max-old-space-size=160 ops/backroadbum/runtime.mjs
+Environment=NODE_ENV=production
+Environment=NO_COLOR=1
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/backroadbum/ship
+ReadOnlyPaths=/etc/backroadbum/ship.json
+MemoryHigh=280M
+MemoryMax=360M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
