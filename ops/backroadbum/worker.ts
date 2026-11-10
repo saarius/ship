@@ -2,7 +2,9 @@
 import { StoreShipping } from '../../service/src/store.js';
 import { handle } from '../../service/src/worker.js';
 import { createAuthenticator } from '../../service/src/auth.js';
-import { openPrintLink } from '../../service/src/session.js';
+import { openPrintLink, mintPrintLink } from '../../service/src/session.js';
+import { showAdminOrder } from '../../service/src/admin.js';
+import { practiceCommand, type PracticeCommand } from './practice.js';
 import { ServiceError, ok, toOutcome, type Outcome } from '../../service/src/errors.js';
 import { packingSettings } from './packing.js';
 import { MerchantAdmission, admissionCommand } from './admission.js';
@@ -74,6 +76,35 @@ export class MerchantStoreShipping extends StoreShipping {
       'SELECT 1 FROM label_events WHERE event_id=? AND order_id=?', eventId, state.orderId).toArray().length) return denied();
     return super.ackLabel(body, admission);
   }
+  async merchantPacking(action: string, fields: Record<string, string>): Promise<Outcome> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (this.merchantAdmission.read().orderId) return denied();
+      return action === 'ship-from' ? super.saveShipFrom(fields) : action === 'add-box' ? super.addBox(fields) : super.removeBox(fields.boxId!);
+    });
+  }
+  async merchantPracticeCommand(command: PracticeCommand): Promise<Outcome> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const state = this.merchantAdmission.read();
+      if (!state.enabled || state.orderId !== command.orderId) return denied();
+      if (state.revision !== command.revision) return { ok: false, status: 409, code: 'OUTDATED', message: 'Admission changed. Reload before retrying.' };
+      const summary = await this.orderSummary(command.orderId);
+      if (!summary || !summary.order.test || summary.order.version !== command.version) return { ok: false, status: 409, code: 'OUTDATED', message: 'Order changed or is not available. Reload before retrying.' };
+      if (command.action === 'print') {
+        // Never accept a browser-provided label ID or mint for another order.
+        const label = summary.labels[0];
+        if (summary.labels.length !== 1 || !label || !label.practice || !label.test || label.status !== 'bought') return denied();
+        const exp = Math.floor(Date.now() / 1000) + 300;
+        const token = await mintPrintLink(this.env, { site: SITE, labelId: label.labelId, exp });
+        return ok({ url: ORIGIN + '/api/ship/print/' + token, expiresAt: new Date(exp * 1000).toISOString() });
+      }
+      // One label ever through this UI, even after an order-version update or cancellation.
+      // A lost response is recovered by reading, never by automatically buying again.
+      if (summary.labels.length) return { ok: false, status: 409, code: 'ALREADY_LABELED', message: 'A label record already exists. Reload to inspect it.' };
+      return super.buyLabel({ orderId: command.orderId, uid: 'admin:' + command.by!.trim(), fields: {
+        version: String(command.version), boxId: command.boxId!, weightOz: String(command.weightOz!), kind: 'practice', service: 'GA',
+      } });
+    });
+  }
   protected override emailSender(): null { return null; }
 }
 
@@ -97,7 +128,7 @@ export default { async fetch(request: Request, env: MerchantEnv): Promise<Respon
       return handle(request, env);
     }
     const machine = ['/v1/orders', '/v1/labels', '/v1/labels/ack'].includes(url.pathname);
-    const admin = url.pathname === '/v1/admin/status' || url.pathname === '/v1/admin/admission' || url.pathname === '/v1/admin/practice-settings' || /^\/v1\/admin\/(?:orders(?:\/[A-Za-z0-9._:%-]+(?:\/(?:prices|labels))?)?|labels\/[A-Za-z0-9._:%-]+\/(?:cancel|print-link))$/.test(url.pathname);
+    const admin = url.pathname === '/v1/admin/practice-order' || url.pathname === '/v1/admin/practice-label' || url.pathname === '/v1/admin/status' || url.pathname === '/v1/admin/admission' || url.pathname === '/v1/admin/practice-settings' || /^\/v1\/admin\/(?:orders(?:\/[A-Za-z0-9._:%-]+(?:\/(?:prices|labels))?)?|labels\/[A-Za-z0-9._:%-]+\/(?:cancel|print-link))$/.test(url.pathname);
     if (!machine && !admin) return json({ error: 'not_found' }, 404);
     auth ??= createAuthenticator({ issuer: ORIGIN, audience: AUDIENCE, jwksUrl: ORIGIN + '/.well-known/jwks.json' });
     const principal = await auth(request, machine ? 'ship:orders' : 'ship:admin');
@@ -110,6 +141,21 @@ export default { async fetch(request: Request, env: MerchantEnv): Promise<Respon
       return json({ schema: 'backroadbum.ship-admin/v1', mode: 'test', provider: 'practice',
         admission: state.enabled ? 'selected-order' : 'closed', commerceConnected: false });
     }
+    if (url.pathname === '/v1/admin/practice-order') {
+      if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+      const admission = await store.getMerchantAdmission();
+      const result = admission.orderId ? await showAdminOrder(store, admission.orderId).catch(error => {
+        if (error instanceof ServiceError && error.status === 404) return ok({ order: null });
+        throw error;
+      }) : ok({ order: null });
+      if (!result.ok) return json({ error: result.code }, result.status);
+      return json({ schema: 'backroadbum.ship-practice/v1', admission, ...(result.body as object) });
+    }
+    if (url.pathname === '/v1/admin/practice-label') {
+      if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+      const result = await store.merchantPracticeCommand(await practiceCommand(request)) as unknown as Outcome;
+      return result.ok ? json(result.body, result.status) : json({ error: { code: result.code, message: result.message } }, result.status);
+    }
     // Operator-only for now: no Caddy route or plugin action exposes this control.
     if (url.pathname === '/v1/admin/admission') {
       if (request.method === 'GET') return json(await store.getMerchantAdmission());
@@ -118,9 +164,9 @@ export default { async fetch(request: Request, env: MerchantEnv): Promise<Respon
       return result.ok ? json(result.body, result.status) : json({ error: { code: result.code, message: result.message } }, result.status);
     }
     if (url.pathname === '/v1/admin/practice-settings') {
-      // Packing-only UI stays unqualified once any order has been selected, even after disable.
-      if ((await store.getMerchantAdmission()).orderId) return json({ error: 'packing_profile_closed_intake_required' }, 403);
-      return packingSettings(request, env.SHIP_STORES.get(env.SHIP_STORES.idFromName(SITE)));
+      // Packing inspection stays available after selection; freeze edits for this one-order generation.
+      if (request.method !== 'GET' && (await store.getMerchantAdmission()).orderId) return json({ error: 'packing_profile_closed_intake_required' }, 403);
+      return packingSettings(request, store, async (action, fields) => await store.merchantPacking(action, fields) as unknown as Outcome);
     }
     return handle(request, env);
   } catch (error) {

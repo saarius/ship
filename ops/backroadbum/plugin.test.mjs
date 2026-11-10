@@ -8,10 +8,17 @@ const token = (patch = {}) => [b64({ alg: 'ES256' }), b64({ iss: ORIGIN, aud: 'b
   scope: 'ship:admin', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 300, ...patch }), b64('fixture')].join('.');
 const status = { schema: 'backroadbum.ship-admin/v1', mode: 'test', provider: 'practice', admission: 'closed', commerceConnected: false };
 const empty = { schema: 'backroadbum.ship-packing/v1', shipFrom: null, boxes: [] };
+const admission = { schema: 'backroadbum.ship-admission/v1', revision: 0, orderId: null, enabled: false, updatedAt: null };
+const selected = { ...admission, revision: 1, orderId: 'fixture-order', enabled: true };
+const fixtureOrder = { orderId: selected.orderId, number: 9999, version: 1, status: 'processing', test: true,
+  shipTo: { name: 'Fixture', lines: ['1 Example Way'], city: 'Example', region: 'CA', postalCode: '90000' }, addressProblem: null,
+  lines: [{ name: 'Demo mug', quantity: 1 }], labels: [] };
+const fixtureLabel = { labelId: 'label_fixture', tracking: 'TEST1234', status: 'bought', practice: true, test: true, priceCents: null, delivery: null };
+const practice = { schema: 'backroadbum.ship-practice/v1', admission, order: null };
 const from = { name: 'Demo', line1: '1 Example Way', city: 'Example', region: 'CA', postalCode: '90000' };
 function host({ role = 50, surface = 'admin-page', site = ORIGIN, id = 'r_ehdlg5cxkb3ffqvr', saved = JSON.stringify({ siteId: 'backroadbum', storeKey: KEY }),
-  pass = token(), health = status, orders = [], packing = empty, fail = '', size = false, mutationError = 0 } = {}) {
-  const calls = []; let kept = structuredClone(packing);
+  pass = token(), health = status, state = practice, packing = empty, fail = '', size = false, mutationError = 0, labelError = false, printUrl } = {}) {
+  const calls = []; let kept = structuredClone(packing), current = structuredClone(state);
   const ctx = { site: { url: site }, plugin: { id }, settings: { getVersioned: async () => ({ value: saved, revision: '1' }) },
     http: { async fetch(url, init) {
       calls.push({ url, init });
@@ -19,7 +26,13 @@ function host({ role = 50, surface = 'admin-page', site = ORIGIN, id = 'r_ehdlg5
       if (url === ORIGIN + '/api/store-passes') return Response.json({ access_token: pass });
       if (size) return new Response(' '.repeat(1024 * 1024 + 1));
       if (url.endsWith('/status')) return Response.json(health);
-      if (url.endsWith('/orders')) return Response.json({ orders });
+      if (url.endsWith('/practice-order')) return Response.json(current);
+      if (url.endsWith('/practice-label')) {
+        const command = JSON.parse(init.body);
+        if (labelError) return new Response('sk_test_do_not_echo', { status: 503 });
+        if (command.action === 'print') return Response.json({ url: printUrl ?? ORIGIN + '/api/ship/print/fixture.token.here', expiresAt: new Date(Date.now() + 300000).toISOString() });
+        current.order.labels = [fixtureLabel]; return Response.json(fixtureLabel, { status: 201 });
+      }
       if (url.endsWith('/practice-settings')) {
         if (init.method === 'POST') {
           if (mutationError) return Response.json({ error: { code: mutationError === 400 ? 'INVALID_INPUT' : 'UNAVAILABLE', message: mutationError === 400 ? 'Length (in) must be from 0.1 to 108.' : 'sk_test_do_not_echo' } }, { status: mutationError });
@@ -99,11 +112,51 @@ test('invalid input retains typed values; uncertain save has no success or autom
     assert.equal(h.calls.filter(call => call.url.endsWith('/practice-settings') && call.init.method === 'POST').length, 1);
   }
 });
+const active = (patch = {}) => host({ health: { ...status, admission: 'selected-order' }, state: { ...practice, admission: selected, order: fixtureOrder },
+  packing: { ...empty, shipFrom: from, boxes: [{ boxId: 'box_fixture', name: 'Fixture box', lengthIn: 6, widthIn: 4, heightIn: 3, weightOz: 1 }] }, ...patch });
+const createAction = { type: 'form_submit', action_id: 'practice:1:1:fixture-order', values: { boxId: 'box_fixture', weightOz: '9' } };
+test('native selected-order view creates only practice with the authenticated actor, then offers a scoped print action', async () => {
+  const h = active(); const view = await h.page();
+  assert.match(view, /Order #9999 \(TEST\)/); assert.match(view, /Create practice label/);
+  const created = await h.page(createAction); assert.match(created, /Practice label created/); assert.match(created, /TEST1234/); assert.doesNotMatch(created, /Create practice label/);
+  const command = JSON.parse(h.calls.find(c => c.url.endsWith('/practice-label')).init.body);
+  assert.deepEqual(command, { action: 'create', revision: 1, version: 1, orderId: 'fixture-order', boxId: 'box_fixture', weightOz: 9, by: 'admin' });
+  const printed = await h.page({ type: 'block_action', action_id: 'print:1:1:fixture-order' }); assert.match(printed, /Open practice PDF/);
+  assert.doesNotMatch(printed, /dk_store_|live postage|ship.dinkuskit/);
+  const writes = h.calls.filter(c => c.url.endsWith('/practice-label')).length;
+  assert.match(await h.page(createAction), /Label action unavailable/);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/practice-label')).length, writes);
+});
+test('stale, disabled, foreign and invalid label controls cannot dispatch; invalid weight remains typed', async () => {
+  for (const action_id of ['practice:0:1:fixture-order', 'practice:1:2:fixture-order', 'practice:1:1:foreign']) {
+    const h = active(); assert.match(await h.page({ ...createAction, action_id }), /Order actions changed/); assert.ok(!h.calls.some(c => c.url.endsWith('/practice-label')));
+  }
+  for (const values of [{ boxId: 'box_foreign', weightOz: '9' }, { boxId: 'box_fixture', weightOz: 'Keep typed' }, { boxId: 'box_fixture', weightOz: '0' }]) {
+    const h = active(); const result = await h.page({ ...createAction, values }); assert.match(result, /Label not created/); assert.ok(!h.calls.some(c => c.url.endsWith('/practice-label')));
+    if (values.weightOz === 'Keep typed') assert.match(result, /Keep typed/);
+  }
+  const h = active({ health: status, state: { ...practice, admission: { ...selected, enabled: false }, order: fixtureOrder } });
+  assert.match(await h.page(createAction), /Order actions disabled/); assert.ok(!h.calls.some(c => c.url.endsWith('/practice-label')));
+  const frozen = active(); assert.match(await frozen.page({ type: 'block_action', action_id: 'packing' }), /Packing edits frozen/);
+  assert.ok(!frozen.calls.some(c => c.init.method === 'POST' && c.url.endsWith('/practice-settings')));
+});
+test('uncertain labels never auto-replay, unsafe print destinations and foreign/live order data fail closed', async () => {
+  const h = active({ labelError: true }); const result = await h.page(createAction); assert.match(result, /Label creation not confirmed/); assert.doesNotMatch(result, /Practice label created|sk_test_do_not_echo/);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/practice-label')).length, 1);
+  for (const printUrl of ['https://foreign.invalid/print/fixture', ORIGIN + '/api/ship/print/token?secret=1']) {
+    const h = active({ state: { ...practice, admission: selected, order: { ...fixtureOrder, labels: [fixtureLabel] } }, printUrl });
+    assert.match(await h.page({ type: 'block_action', action_id: 'print:1:1:fixture-order' }), /Print link not confirmed/);
+  }
+  for (const order of [{ ...fixtureOrder, test: false }, { ...fixtureOrder, orderId: 'foreign' }, { ...fixtureOrder, labels: [{ ...fixtureLabel, practice: false }] }]) {
+    const h = active({ state: { ...practice, admission: selected, order } }); assert.match(await h.page(), /connection unavailable/);
+  }
+  const waiting = active({ state: { ...practice, admission: selected } }); assert.match(await waiting.page(), /Selected order not received/);
+});
 test('missing/wrong/expired passes, outages, changed admission or unexpected data cannot become a verified empty list', async () => {
   for (const options of [{ pass: '' }, { pass: token({ aud: 'backroadbum-payments' }) }, { pass: token({ iss: 'https://dinkuskit.com/account' }) },
     { pass: token({ site_id: 'other' }) }, { pass: token({ scope: 'ship:orders' }) }, { pass: token({ exp: 1 }) },
-    { fail: '/api/store-passes' }, { fail: '/status' }, { fail: '/orders' }, { fail: '/practice-settings' }, { health: { ...status, admission: 'selected-order' } },
-    { health: { ...status, commerceConnected: true } }, { health: { ...status, provider: 'live' } }, { orders: [{}] }, { packing: { ...empty, schema: 'foreign' } }, { size: true }]) {
+    { fail: '/api/store-passes' }, { fail: '/status' }, { fail: '/practice-order' }, { fail: '/practice-settings' }, { health: { ...status, admission: 'selected-order' } },
+    { health: { ...status, commerceConnected: true } }, { health: { ...status, provider: 'live' } }, { state: { ...practice, order: fixtureOrder } }, { packing: { ...empty, schema: 'foreign' } }, { size: true }]) {
     const h = host(options); const page = await h.page(); assert.match(page, /connection unavailable/); assert.doesNotMatch(page, /No orders admitted|sk_test_do_not_echo/);
   }
 });

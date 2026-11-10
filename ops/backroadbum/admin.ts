@@ -1,4 +1,5 @@
-// Merchant-only Block Kit admin. Packing setup does not admit orders or authorize labels.
+// Merchant-only Block Kit admin. No admission control or live-postage action.
+import { practicePage, practiceTarget, practiceView } from './practice-page.js';
 import type { BlockResponse, FormField } from '@emdash-cms/blocks/server';
 import type { PluginContext, SandboxedRouteContext } from 'emdash/plugin';
 import { tradeStoreKey, admitPass } from './ship.js';
@@ -74,9 +75,17 @@ export async function shippingAdmin(route: SandboxedRouteContext, ctx: PluginCon
   if (route.ui?.surface !== 'admin-page' || !route.user?.id || typeof route.user.role !== 'number' || route.user.role < 50) {
     return error('Administrator access required', 'This merchant connection is visible only to site Administrators.');
   }
-  const input = route.input;
+  const input = record(route.input) ? route.input : null;
   let view = false, mutation: { action: string; fields: Record<string, string> } | undefined, typed: { action: string; values: Record<string, string> } | undefined;
-  if (record(input) && input.type === 'block_action' && input.action_id === 'packing') view = true;
+  const target = record(input) && typeof input.action_id === 'string' ? practiceTarget(input.action_id) : null;
+  let labelFields: Record<string, string> | undefined;
+  if (target) {
+    if (target.action === 'create' && input!.type === 'form_submit') {
+      const values = formValues(input!.values, [['boxId', 'Box'], ['weightOz', 'Weight']]);
+      if (!values || Object.keys(values).sort().join() !== 'boxId,weightOz') return error('Invalid label form', 'Use the box and total packed weight fields. Nothing was sent.');
+      labelFields = values;
+    } else if (target.action !== 'print' || input!.type !== 'block_action') return error('Action unavailable', 'Use the current order view. Nothing was sent.');
+  } else if (record(input) && input.type === 'block_action' && input.action_id === 'packing') view = true;
   else if (record(input) && input.type === 'form_submit' && ['save-origin', 'add-box'].includes(String(input.action_id))) {
     const values = formValues(input.values, input.action_id === 'save-origin' ? addressFields : boxFields);
     if (!values) return error('Invalid packing form', 'Use only the named single-line fields in this form. Nothing was sent.');
@@ -85,7 +94,7 @@ export async function shippingAdmin(route: SandboxedRouteContext, ctx: PluginCon
   } else if (record(input) && input.type === 'block_action' && input.action_id === 'remove-box' && short(input.value) && /^box_[A-Za-z0-9-]{1,80}$/.test(input.value)) {
     view = true; mutation = { action: 'remove-box', fields: { boxId: input.value } };
   } else if (!record(input) || !(input.type === 'page_load' || input.type === 'block_action' && input.action_id === 'refresh')) {
-    return error('Action unavailable', 'This profile supports connection checks and practice packing only. It cannot admit orders or create labels.');
+    return error('Action unavailable', 'Use the current connection, packing or practice-label controls. This profile cannot select orders or buy postage.');
   }
   if (ctx.site?.url !== ORIGIN || ctx.plugin?.id !== ID || !ctx.http || !ctx.settings) {
     return error('Merchant profile unavailable', 'Ask the operator to check this installation and its fixed merchant address.');
@@ -113,10 +122,41 @@ export async function shippingAdmin(route: SandboxedRouteContext, ctx: PluginCon
     };
     const status = await call('status');
     if (!record(status) || status.schema !== 'backroadbum.ship-admin/v1' || status.mode !== 'test' || status.provider !== 'practice' ||
-        status.admission !== 'closed' || status.commerceConnected !== false) throw Error('unexpected_status');
-    const list = await call('orders');
-    if (!record(list) || !Array.isArray(list.orders) || list.orders.length !== 0) throw Error('unexpected_orders');
+        !['closed', 'selected-order'].includes(String(status.admission)) || status.commerceConnected !== false) throw Error('unexpected_status');
+    const practice = practiceView(await call('practice-order'));
+    if ((status.admission === 'selected-order') !== practice.admission.enabled) throw Error('admission_changed');
     const current = packing(await call('practice-settings'));
+    if (target) {
+      const { admission, order } = practice;
+      if (!admission.enabled || target.revision !== admission.revision || target.orderId !== admission.orderId || !order || target.version !== order.version) {
+        return practicePage(practice, current, { title: 'Order actions changed', description: 'Review the refreshed state before trying again.', error: true });
+      }
+      if (target.action === 'create' && (order.labels.length || order.status !== 'processing')) {
+        return practicePage(practice, current, { title: 'Label action unavailable', description: 'A label already exists or this order is no longer Processing. No request was sent.', error: true });
+      }
+      const weightOz = Number(labelFields?.weightOz?.trim() || NaN);
+      if (target.action === 'create' && (!current.boxes.some(box => box.boxId === labelFields?.boxId) || !Number.isFinite(weightOz) || weightOz < 0.1 || weightOz > 1120)) {
+        return practicePage(practice, current, { title: 'Label not created', description: 'Choose a saved box and enter a packed weight from 0.1 to 1120 ounces.', error: true }, labelFields);
+      }
+      try {
+        const result = await call('practice-label', { ...target, ...(target.action === 'create' ? { boxId: labelFields!.boxId, weightOz, by: route.user.id } : {}) });
+        if (target.action === 'print') {
+          if (!record(result) || typeof result.url !== 'string' || !/^https:\/\/backroadbum\.com\/api\/ship\/print\/[A-Za-z0-9_.-]+$/.test(result.url) ||
+              typeof result.expiresAt !== 'string' || !Number.isFinite(Date.parse(result.expiresAt)) || Date.parse(result.expiresAt) <= Date.now() || Date.parse(result.expiresAt) > Date.now() + 301000) throw Error('unexpected_print');
+          return practicePage(practice, current, undefined, undefined, result.url);
+        }
+        // The write response alone is not UI success: reload and validate the durable label record.
+        const updated = practiceView(await call('practice-order'));
+        if (!updated.order?.labels.length) throw Error('label_not_confirmed');
+        return practicePage(updated, current, { title: 'Practice label created', description: 'The label is saved in Ship. Commerce fulfillment is a separate handoff.' });
+      } catch {
+        return practicePage(practice, current, { title: target.action === 'print' ? 'Print link not confirmed' : 'Label creation not confirmed',
+          description: 'Refresh and inspect the saved order before retrying. The last request may already have succeeded.', error: true }, labelFields);
+      }
+    }
+    if (practice.admission.orderId) {
+      return practicePage(practice, current, view ? { title: 'Packing edits frozen', description: 'Packing settings cannot change after an order is selected for this generation.', error: true } : undefined);
+    }
     if (view) {
       if (!mutation) return packingPage(current);
       try {

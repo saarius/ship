@@ -83,7 +83,7 @@ test('selection is compare-and-set, pinned for its generation and durable withou
     assert.deepEqual((await store.getSettings()).boxes, packing.boxes);
     await host.dispose(); host = await createPracticeHost({ config, stateDir, fetchJwks });
     assert.deepEqual(await (await call(host)).json(), enabled);
-    assert.equal((await call(host, '/v1/admin/practice-settings')).status, 403);
+    assert.equal((await call(host, '/v1/admin/practice-settings')).status, 200);
     assert.equal((await (await host.fetch('/health')).json()).admission, 'selected-order');
     assert.equal(host.network().refusedFetches, 0);
   } finally { if (host) await host.dispose(); rmSync(stateDir, { recursive: true, force: true }); }

@@ -2,6 +2,7 @@
 import type { StoreShipping, Settings } from '../../service/src/store.js';
 import { ServiceError, type Outcome } from '../../service/src/errors.js';
 type Store = DurableObjectStub<StoreShipping>;
+type Fields = Record<string, string>;
 const SCHEMA = 'backroadbum.ship-packing/v1';
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -33,13 +34,13 @@ async function input(request: Request) {
   if (body.action === 'remove-box' && (Object.keys(fields).join() !== 'boxId' || !/^box_[A-Za-z0-9-]{1,80}$/.test(String(fields.boxId)))) return refuse();
   return { action: body.action, fields };
 }
-export async function packingSettings(request: Request, store: Store): Promise<Response> {
+export async function packingSettings(request: Request, store: Store, mutate?: (action: string, fields: Fields) => Promise<Outcome>): Promise<Response> {
   try {
     if (request.method === 'GET') return json(projection(await store.getSettings()));
     if (request.method !== 'POST') return json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Use GET or POST.' } }, 405);
     const { action, fields } = await input(request);
     // Outcome's unknown body is wider than workerd's RPC serializable type; the owning service uses the same boundary cast.
-    const result = (action === 'ship-from' ? await store.saveShipFrom(fields)
+    const result = (mutate ? await mutate(action, fields as Fields) : action === 'ship-from' ? await store.saveShipFrom(fields)
       : action === 'add-box' ? await store.addBox(fields) : await store.removeBox(String(fields.boxId))) as unknown as Outcome;
     if (!result.ok) return json({ error: { code: result.code, message: result.message } }, result.status);
     // Never return postage accounts, reply-to addresses, email settings or private print configuration.
