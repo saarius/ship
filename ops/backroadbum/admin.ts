@@ -42,17 +42,22 @@ const button = (label: string, action_id: string) => ({ type: 'button' as const,
 function packingPage(saved: Packing, typed?: { action: string; values: Record<string, string> }, failure?: string, success?: string): BlockResponse {
   const fields = (pairs: readonly (readonly [string, string])[], values: Record<string, string>): FormField[] => pairs.map(([action_id, label]) =>
     ({ type: 'text_input', action_id, label, initial_value: values[action_id] ?? '' }));
+  const feedback = (action: string): BlockResponse['blocks'] => [
+    ...(failure && typed?.action === action ? [{ type: 'banner' as const, variant: 'error' as const, title: 'Packing not saved', description: failure }] : []),
+    ...(success && (action === 'save-origin' && success.startsWith('Origin') || action === 'add-box' && success === 'Box size added' || action === 'remove-box' && success === 'Box size removed')
+      ? [{ type: 'banner' as const, variant: 'default' as const, title: success }] : []),
+  ];
   return { blocks: [
     { type: 'header', text: 'Practice packing' },
     { type: 'actions', elements: [button('Back to Shipments', 'refresh')] },
     { type: 'context', text: 'These settings prepare a demo return address and box sizes only. Order intake remains closed. Use a fictional US address; no postage account is connected.' },
-    ...(failure ? [{ type: 'banner' as const, variant: 'error' as const, title: 'Packing not saved', description: failure }] : []),
-    ...(success ? [{ type: 'banner' as const, variant: 'default' as const, title: success }] : []),
     { type: 'header', text: 'Origin address' },
     { type: 'context', text: saved.shipFrom ? 'Saved origin loaded from Ship. Changes replace this address.' : 'No origin address saved yet.' },
+    ...feedback('save-origin'),
     { type: 'form', block_id: 'practice-origin-' + crypto.randomUUID(), fields: fields(addressFields, typed?.action === 'save-origin' ? typed.values : saved.shipFrom ?? {}),
       submit: { label: 'Save origin address', action_id: 'save-origin' } },
     { type: 'header', text: 'Saved boxes' },
+    ...feedback('remove-box'),
     { type: 'table', page_action_id: 'packing', empty_text: 'No box sizes saved yet.', columns: [{ key: 'name', label: 'Box' }, { key: 'size', label: 'Inches' },
       { key: 'weight', label: 'Empty weight' }, { key: 'remove', label: '', format: 'element' }], rows: saved.boxes.map(box => ({
         name: box.name, size: `${box.lengthIn} × ${box.widthIn} × ${box.heightIn}`, weight: `${box.weightOz} oz`,
@@ -60,6 +65,7 @@ function packingPage(saved: Packing, typed?: { action: string; values: Record<st
       })) },
     { type: 'header', text: 'Add a box' },
     { type: 'context', text: 'Enter the empty box’s outside dimensions and weight, not the packed order’s weight. Box sizes are yours; none are added automatically.' },
+    ...feedback('add-box'),
     { type: 'form', block_id: 'practice-box-' + crypto.randomUUID(), fields: fields(boxFields, typed?.action === 'add-box' ? typed.values : {}),
       submit: { label: 'Add box size', action_id: 'add-box' } },
   ] };
