@@ -37,6 +37,12 @@ test('closed preparation admits no orders; authentication remains scoped to this
     assert.deepEqual(await (await host.fetch('/health')).json(), { schema: 'backroadbum.ship-health/v1', mode: 'test', provider: 'practice', admission: 'closed', commerceConnected: false });
     assert.equal((await call(host, '/v1/orders', 'ship:orders', body)).status, 403);
     assert.equal((await host.fetch('/v1/admin/orders')).status, 401);
+    assert.equal((await host.fetch('/v1/admin/status')).status, 401);
+    assert.equal((await call(host, '/v1/admin/status', 'ship:orders')).status, 403);
+    assert.equal((await call(host, '/v1/admin/status', 'ship:admin', {})).status, 405);
+    assert.deepEqual(await (await call(host, '/v1/admin/status', 'ship:admin')).json(), {
+      schema: 'backroadbum.ship-admin/v1', mode: 'test', provider: 'practice', admission: 'closed', commerceConnected: false,
+    });
     assert.equal((await call(host, '/v1/admin/orders', 'ship:orders')).status, 403);
     assert.equal((await call(host, '/v1/labels', 'ship:admin')).status, 403);
     for (const claims of [{ site_id: 'other-store' }, { site_origin: 'https://other.example.test' }]) {

@@ -70,11 +70,17 @@ export default { async fetch(request: Request, env: MerchantEnv): Promise<Respon
       return handle(request, env);
     }
     const machine = ['/v1/orders', '/v1/labels', '/v1/labels/ack'].includes(url.pathname);
-    const admin = /^\/v1\/admin\/(?:orders(?:\/[A-Za-z0-9._:%-]+(?:\/(?:prices|labels))?)?|labels\/[A-Za-z0-9._:%-]+\/(?:cancel|print-link))$/.test(url.pathname);
+    const admin = url.pathname === '/v1/admin/status' || /^\/v1\/admin\/(?:orders(?:\/[A-Za-z0-9._:%-]+(?:\/(?:prices|labels))?)?|labels\/[A-Za-z0-9._:%-]+\/(?:cancel|print-link))$/.test(url.pathname);
     if (!machine && !admin) return json({ error: 'not_found' }, 404);
     auth ??= createAuthenticator({ issuer: ORIGIN, audience: AUDIENCE, jwksUrl: ORIGIN + '/.well-known/jwks.json' });
     const principal = await auth(request, machine ? 'ship:orders' : 'ship:admin');
     if (principal.siteId !== SITE || principal.siteOrigin !== ORIGIN) return json({ error: 'forbidden' }, 403);
+    if (url.pathname === '/v1/admin/status') {
+      if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+      await env.SHIP_STORES.get(env.SHIP_STORES.idFromName(SITE)).getSettings();
+      return json({ schema: 'backroadbum.ship-admin/v1', mode: 'test', provider: 'practice',
+        admission: env.MERCHANT_ALLOWED_ORDER_ID ? 'selected-order' : 'closed', commerceConnected: false });
+    }
     return handle(request, env);
   } catch (error) {
     if (error instanceof ServiceError) return json({ error: error.code }, error.status);
